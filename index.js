@@ -1,15 +1,11 @@
-// =============================
-// X (Twitter) Monitor Bot FULL
-// Telegram Notification Bot
-// Interval: 10 seconds realtime-ish
+// ======================================================
+// X (Twitter) Monitor Bot - FULL STABLE VERSION
+// Interval: 10 Seconds
 // Deploy: Railway
-// Source: FXTwitter/Nitter RSS
-// Features:
-// - Add/remove monitored accounts
-// - Telegram dashboard UI modern
-// - User stats monitoring (total users, accounts tracked)
-// - Public shareable bot ready
-// =============================
+// Telegram Notification Bot
+// Source: Nitter RSS
+// Public Share Ready + User Stats
+// ======================================================
 
 import fs from "fs";
 import express from "express";
@@ -20,7 +16,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const PORT = process.env.PORT || 3000;
 
 if (!BOT_TOKEN) {
-  console.error("Missing BOT_TOKEN env");
+  console.error("❌ BOT_TOKEN missing");
   process.exit(1);
 }
 
@@ -31,7 +27,7 @@ const app = express();
 const DB_FILE = "accounts.json";
 let db = { users: {} };
 
-// ===== LOAD DB =====
+// ===================== LOAD DATABASE =====================
 if (fs.existsSync(DB_FILE)) {
   db = JSON.parse(fs.readFileSync(DB_FILE));
 }
@@ -40,10 +36,12 @@ function saveDB() {
   fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
 }
 
-// ===== HELPERS =====
 function ensureUser(id) {
   if (!db.users[id]) {
-    db.users[id] = { accounts: [], lastTweets: {} };
+    db.users[id] = {
+      accounts: [],
+      lastTweets: {}
+    };
   }
 }
 
@@ -58,18 +56,21 @@ function getStats() {
   return { totalUsers, totalAccounts };
 }
 
+// ===================== FETCH RSS =====================
 async function fetchTweets(username) {
   try {
     const feed = await parser.parseURL(
       `https://nitter.net/${username}/rss`
     );
-    return feed.items.slice(0, 2);
-  } catch {
+
+    return feed.items;
+  } catch (err) {
+    console.log("RSS Error:", err.message);
     return [];
   }
 }
 
-// ===== TELEGRAM COMMANDS =====
+// ===================== TELEGRAM COMMANDS =====================
 bot.start((ctx) => {
   ctx.reply(
     "🚀 X Monitor Bot Ready\n\n/add username\n/remove username",
@@ -82,7 +83,7 @@ bot.start((ctx) => {
 
 bot.command("add", (ctx) => {
   const username = ctx.message.text.split(" ")[1];
-  if (!username) return ctx.reply("Username required");
+  if (!username) return ctx.reply("⚠️ Username required");
 
   ensureUser(ctx.from.id);
 
@@ -96,7 +97,7 @@ bot.command("add", (ctx) => {
 
 bot.command("remove", (ctx) => {
   const username = ctx.message.text.split(" ")[1];
-  if (!username) return ctx.reply("Username required");
+  if (!username) return ctx.reply("⚠️ Username required");
 
   ensureUser(ctx.from.id);
 
@@ -126,33 +127,42 @@ bot.action("stats", (ctx) => {
   );
 });
 
-// ===== MONITOR LOOP =====
+// ===================== MONITOR LOGIC (FIXED) =====================
 async function monitor() {
   for (const uid in db.users) {
     const user = db.users[uid];
 
     for (const acc of user.accounts) {
       const tweets = await fetchTweets(acc);
+      if (!tweets.length) continue;
 
-      for (const t of tweets) {
-        if (user.lastTweets[acc] === t.link) continue;
+      const latest = tweets[0];
 
-        user.lastTweets[acc] = t.link;
+      // First time setup
+      if (!user.lastTweets[acc]) {
+        user.lastTweets[acc] = latest.link;
+        saveDB();
+        continue;
+      }
+
+      // If new tweet detected
+      if (user.lastTweets[acc] !== latest.link) {
+        user.lastTweets[acc] = latest.link;
         saveDB();
 
         bot.telegram.sendMessage(
           uid,
-          `🐦 @${acc}\n${t.title}\n${t.link}`
+          `🐦 NEW TWEET @${acc}\n\n${latest.title}\n${latest.link}`
         );
       }
     }
   }
 }
 
-// ===== 10 SECOND INTERVAL =====
+// ===================== 10 SECOND INTERVAL =====================
 setInterval(monitor, 10000);
 
-// ===== WEB UI HEALTH CHECK =====
+// ===================== WEB HEALTH CHECK =====================
 app.get("/", (_, res) => {
   const s = getStats();
 
@@ -163,6 +173,9 @@ app.get("/", (_, res) => {
   `);
 });
 
-app.listen(PORT, () => console.log("Web UI running"));
+app.listen(PORT, () => console.log("🌐 Web UI running"));
 
 bot.launch();
+
+console.log("🤖 Telegram Bot Started");
+      
