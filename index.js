@@ -1,13 +1,16 @@
 // ======================================================
-// X (Twitter) Monitor Bot FINAL STABLE VERSION
+// X (Twitter) REALTIME Monitor Bot PRO
 // Railway Ready | Telegram Notification Bot
-// Interval Monitor: 10 Seconds (Safe Loop)
-// Source: Nitter RSS
+// Hybrid Monitor:
+// 1. FXTwitter HTML scrape (realtime fast)
+// 2. Nitter RSS fallback (backup)
+// Interval: 10 seconds stable
 // ======================================================
 
 import fs from "fs";
 import express from "express";
 import Parser from "rss-parser";
+import fetch from "node-fetch";
 import { Telegraf, Markup } from "telegraf";
 
 const BOT_TOKEN = process.env.BOT_TOKEN;
@@ -40,37 +43,41 @@ function ensureUser(id) {
   }
 }
 
-function getStats() {
-  const totalUsers = Object.keys(db.users).length;
-  let totalAccounts = 0;
+// ================= FETCH REALTIME FXTWITTER =================
+async function fetchFXTwitter(username) {
+  try {
+    const res = await fetch(`https://fxtwitter.com/${username}`);
+    const html = await res.text();
 
-  for (const u in db.users) {
-    totalAccounts += db.users[u].accounts.length;
+    const match = html.match(/status\/(\d+)/);
+    if (!match) return null;
+
+    return `https://twitter.com/${username}/status/${match[1]}`;
+  } catch {
+    return null;
   }
-
-  return { totalUsers, totalAccounts };
 }
 
-// ================= FETCH RSS =================
-async function fetchTweets(username) {
+// ================= FALLBACK RSS =================
+async function fetchRSS(username) {
   try {
     const feed = await parser.parseURL(
       `https://nitter.net/${username}/rss`
     );
-    return feed.items;
-  } catch (err) {
-    console.log("RSS error:", err.message);
-    return [];
+
+    if (!feed.items.length) return null;
+    return feed.items[0].link;
+  } catch {
+    return null;
   }
 }
 
 // ================= TELEGRAM COMMANDS =================
 bot.start((ctx) => {
   ctx.reply(
-    "🚀 X Monitor Bot Ready\n\n/add username\n/remove username",
+    "🚀 Realtime X Monitor Ready\n\n/add username\n/remove username",
     Markup.inlineKeyboard([
-      [Markup.button.callback("📊 Dashboard", "dashboard")],
-      [Markup.button.callback("📈 Stats", "stats")]
+      [Markup.button.callback("📊 Dashboard", "dashboard")]
     ])
   );
 });
@@ -86,7 +93,7 @@ bot.command("add", (ctx) => {
     saveDB();
   }
 
-  ctx.reply(`Added @${username}`);
+  ctx.reply(`Tracking @${username}`);
 });
 
 bot.command("remove", (ctx) => {
@@ -101,7 +108,7 @@ bot.command("remove", (ctx) => {
 
   saveDB();
 
-  ctx.reply(`Removed @${username}`);
+  ctx.reply(`Stopped tracking @${username}`);
 });
 
 bot.action("dashboard", (ctx) => {
@@ -110,48 +117,39 @@ bot.action("dashboard", (ctx) => {
   const list =
     db.users[ctx.from.id].accounts.join("\n") || "No accounts yet";
 
-  ctx.editMessageText(`Monitoring List:\n\n${list}`);
+  ctx.editMessageText(`Monitoring:\n\n${list}`);
 });
 
-bot.action("stats", (ctx) => {
-  const s = getStats();
-
-  ctx.editMessageText(
-    `Users: ${s.totalUsers}\nAccounts tracked: ${s.totalAccounts}`
-  );
-});
-
-// ================= MONITOR FUNCTION =================
+// ================= MONITOR =================
 async function monitor() {
   for (const uid in db.users) {
     const user = db.users[uid];
 
     for (const acc of user.accounts) {
-      const tweets = await fetchTweets(acc);
-      if (!tweets.length) continue;
+      let latest = await fetchFXTwitter(acc);
 
-      const latest = tweets[0];
+      if (!latest) latest = await fetchRSS(acc);
+      if (!latest) continue;
 
       if (!user.lastTweets[acc]) {
-        user.lastTweets[acc] = latest.link;
+        user.lastTweets[acc] = latest;
         saveDB();
         continue;
       }
 
-      if (user.lastTweets[acc] !== latest.link) {
-        user.lastTweets[acc] = latest.link;
+      if (user.lastTweets[acc] !== latest) {
+        user.lastTweets[acc] = latest;
         saveDB();
 
         bot.telegram.sendMessage(
           uid,
-          `🐦 NEW TWEET @${acc}\n\n${latest.title}\n${latest.link}`
+          `🐦 NEW TWEET @${acc}\n${latest}`
         );
       }
     }
   }
 }
 
-// ================= SAFE LOOP =================
 async function safeMonitor() {
   try {
     await monitor();
@@ -162,30 +160,15 @@ async function safeMonitor() {
 
 setInterval(safeMonitor, 10000);
 
-// ================= WEB SERVER =================
+// ================= WEB =================
 app.get("/", (_, res) => {
-  const s = getStats();
-
-  res.send(`
-    <h1>X Monitor Bot Running</h1>
-    <p>Users: ${s.totalUsers}</p>
-    <p>Accounts: ${s.totalAccounts}</p>
-  `);
+  res.send("Realtime X Monitor Running");
 });
 
 app.listen(PORT, () => console.log("Web UI running"));
 
-// ================= START BOT =================
 bot.launch().then(() => console.log("Telegram Bot Started"));
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
-
-process.on("unhandledRejection", (err) =>
-  console.log("UnhandledRejection:", err)
-);
-
-process.on("uncaughtException", (err) =>
-  console.log("UncaughtException:", err)
-);
     
