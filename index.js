@@ -1,160 +1,164 @@
-// ======================================================
-// X (Twitter) ADVANCED MONITOR BOT
-// Telegram Bot with Profile Preview + Notification Options
-// Deploy: Railway | Node.js + Telegraf
-// Features:
-// - /add username → fetch profile preview
-// - Show followers / following (scraped)
-// - User selects notification types:
-//   Tweet, Retweet, Reply, Follow, Unfollow
-// - Hybrid FXTwitter scrape + RSS fallback
-// ======================================================
-
-import fs from "fs";
-import express from "express";
-import Parser from "rss-parser";
-import fetch from "node-fetch";
 import { Telegraf, Markup } from "telegraf";
+import axios from "axios";
+import express from "express";
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const PORT = process.env.PORT || 3000;
-
-if (!BOT_TOKEN) process.exit(1);
-
-const bot = new Telegraf(BOT_TOKEN);
-const parser = new Parser();
+const bot = new Telegraf(process.env.BOT_TOKEN);
 const app = express();
 
-// ===== DATABASE =====
-const DB_FILE = "accounts.json";
-let db = { users: {} };
+const BEARER = process.env.X_BEARER_TOKEN;
 
-if (fs.existsSync(DB_FILE)) db = JSON.parse(fs.readFileSync(DB_FILE));
+let users = {}; // telegram_user_id -> monitored accounts
 
-const saveDB = () =>
-  fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-
-function ensureUser(id) {
-  if (!db.users[id]) {
-    db.users[id] = {
-      accounts: {},
-      lastTweets: {}
-    };
-  }
-}
-
-// ===== PROFILE SCRAPE =====
-async function fetchProfile(username) {
+// ===== HELPER: GET USER DATA FROM X =====
+async function getUserProfile(username) {
   try {
-    const res = await fetch(`https://fxtwitter.com/${username}`);
-    const html = await res.text();
+    const res = await axios.get(
+      `https://api.x.com/2/users/by/username/${username}?user.fields=public_metrics`,
+      {
+        headers: {
+          Authorization: `Bearer ${BEARER}`,
+        },
+      }
+    );
 
-    const followers = html.match(/followers[^0-9]*([0-9,.]+)/i)?.[1] || "?";
-    const following = html.match(/following[^0-9]*([0-9,.]+)/i)?.[1] || "?";
-
-    return { followers, following };
-  } catch {
-    return { followers: "?", following: "?" };
-  }
-}
-
-// ===== FETCH TWEET =====
-async function fetchLatest(username) {
-  try {
-    const res = await fetch(`https://fxtwitter.com/${username}`);
-    const html = await res.text();
-
-    const match = html.match(/status\/(\d+)/);
-    if (match) return `https://twitter.com/${username}/status/${match[1]}`;
-
-    const feed = await parser.parseURL(`https://nitter.net/${username}/rss`);
-    return feed.items?.[0]?.link || null;
-  } catch {
+    return res.data.data;
+  } catch (err) {
     return null;
   }
 }
 
-// ===== COMMANDS =====
-bot.start((ctx) => {
-  ctx.reply("X Monitor Bot Ready\n/add username");
-});
-
-bot.command("add", async (ctx) => {
-  const username = ctx.message.text.split(" ")[1];
-  if (!username) return ctx.reply("Username required");
-
-  ensureUser(ctx.from.id);
-
-  const profile = await fetchProfile(username);
-
-  db.users[ctx.from.id].accounts[username] = {
-    notify: []
-  };
-
-  saveDB();
-
-  ctx.reply(
-    `Profile Found: @${username}\nFollowers: ${profile.followers}\nFollowing: ${profile.following}\n\nSelect notification:` ,
-    Markup.inlineKeyboard([
-      [Markup.button.callback("Tweet", `type_${username}_tweet`)],
-      [Markup.button.callback("Retweet", `type_${username}_retweet`)],
-      [Markup.button.callback("Reply", `type_${username}_reply`)],
-      [Markup.button.callback("Follow", `type_${username}_follow`)],
-      [Markup.button.callback("Unfollow", `type_${username}_unfollow`)],
-      [Markup.button.callback("Done", `done_${username}`)]
-    ])
-  );
-});
-
-// ===== TYPE SELECTION =====
-bot.action(/type_(.*)_(.*)/, (ctx) => {
-  const [, username, type] = ctx.match;
-  const user = db.users[ctx.from.id];
-
-  if (!user.accounts[username].notify.includes(type)) {
-    user.accounts[username].notify.push(type);
-  }
-
-  saveDB();
-  ctx.answerCbQuery(`Added ${type}`);
-});
-
-bot.action(/done_(.*)/, (ctx) => {
-  ctx.editMessageText("Monitoring activated.");
-});
-
-// ===== MONITOR LOOP =====
-async function monitor() {
-  for (const uid in db.users) {
-    const user = db.users[uid];
-
-    for (const username in user.accounts) {
-      const latest = await fetchLatest(username);
-      if (!latest) continue;
-
-      if (!user.lastTweets[username]) {
-        user.lastTweets[username] = latest;
-        saveDB();
-        continue;
+// ===== HELPER: GET LATEST TWEETS =====
+async function getLatestTweets(userId) {
+  try {
+    const res = await axios.get(
+      `https://api.x.com/2/users/${userId}/tweets?max_results=5&tweet.fields=referenced_tweets,created_at`,
+      {
+        headers: {
+          Authorization: `Bearer ${BEARER}`,
+        },
       }
+    );
 
-      if (user.lastTweets[username] !== latest) {
-        user.lastTweets[username] = latest;
-        saveDB();
-
-        if (user.accounts[username].notify.includes("tweet")) {
-          bot.telegram.sendMessage(uid, `New Tweet @${username}\n${latest}`);
-        }
-      }
-    }
+    return res.data.data || [];
+  } catch {
+    return [];
   }
 }
 
-setInterval(() => monitor().catch(() => {}), 10000);
+// ===== START COMMAND =====
+bot.start((ctx) => {
+  ctx.reply(
+    "🚀 X Monitor Bot Ready\n\n/add username\n/remove username"
+  );
+});
 
-// ===== WEB SERVER =====
-app.get("/", (_, res) => res.send("Bot Running"));
-app.listen(PORT);
+// ===== ADD USER =====
+bot.command("add", async (ctx) => {
+  const username = ctx.message.text.split(" ")[1];
+  if (!username) return ctx.reply("Masukkan username.");
+
+  const profile = await getUserProfile(username);
+
+  if (!profile) return ctx.reply("Username tidak ditemukan.");
+
+  const followers = profile.public_metrics.followers_count;
+  const following = profile.public_metrics.following_count;
+  const tweets = profile.public_metrics.tweet_count;
+
+  users[ctx.from.id] = {
+    username,
+    userId: profile.id,
+    options: {},
+    lastTweetId: null,
+    lastFollowers: followers,
+  };
+
+  ctx.reply(
+    `Profile found: @${username}
+Followers: ${followers}
+Following: ${following}
+Tweets: ${tweets}
+
+Select notification:`,
+    Markup.keyboard([
+      ["Tweet"],
+      ["Retweet"],
+      ["Reply"],
+      ["Follow"],
+      ["Unfollow"],
+      ["Done"],
+    ]).resize()
+  );
+});
+
+// ===== OPTION HANDLER =====
+bot.hears(
+  ["Tweet", "Retweet", "Reply", "Follow", "Unfollow"],
+  (ctx) => {
+    const user = users[ctx.from.id];
+    if (!user) return;
+
+    user.options[ctx.message.text] = true;
+    ctx.reply(`✅ ${ctx.message.text} enabled`);
+  }
+);
+
+bot.hears("Done", (ctx) => {
+  ctx.reply("✅ Monitoring started.");
+});
+
+// ===== REMOVE =====
+bot.command("remove", (ctx) => {
+  delete users[ctx.from.id];
+  ctx.reply("❌ Monitoring removed.");
+});
+
+// ===== MONITOR LOOP (10 detik) =====
+setInterval(async () => {
+  for (let telegramId in users) {
+    const data = users[telegramId];
+
+    // CHECK TWEETS
+    if (data.options["Tweet"] || data.options["Reply"] || data.options["Retweet"]) {
+      const tweets = await getLatestTweets(data.userId);
+
+      if (tweets.length > 0) {
+        const latest = tweets[0];
+
+        if (latest.id !== data.lastTweetId) {
+          data.lastTweetId = latest.id;
+
+          bot.telegram.sendMessage(
+            telegramId,
+            `🐦 New Activity from @${data.username}\n\n${latest.text}\n\nhttps://x.com/${data.username}/status/${latest.id}`
+          );
+        }
+      }
+    }
+
+    // CHECK FOLLOWERS CHANGE
+    if (data.options["Follow"] || data.options["Unfollow"]) {
+      const profile = await getUserProfile(data.username);
+      const newFollowers = profile.public_metrics.followers_count;
+
+      if (newFollowers !== data.lastFollowers) {
+        const diff = newFollowers - data.lastFollowers;
+        data.lastFollowers = newFollowers;
+
+        bot.telegram.sendMessage(
+          telegramId,
+          `👥 Follower change for @${data.username}\nChange: ${diff}\nNow: ${newFollowers}`
+        );
+      }
+    }
+  }
+}, 10000);
+
+// ===== WEB SERVER FOR RAILWAY =====
+app.get("/", (req, res) => {
+  res.send("Bot Running");
+});
+
+app.listen(process.env.PORT || 3000);
 
 bot.launch();
-      
