@@ -1,5 +1,5 @@
 {
-  "name": "x-monitor-realtime",
+  "name": "tor",
   "version": "1.0.0",
   "description": "Realtime X (Twitter) Monitor Bot - Railway Ready",
   "type": "module",
